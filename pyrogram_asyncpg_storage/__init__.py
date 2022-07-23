@@ -142,6 +142,9 @@ class PostgreSQLStorage(Storage):
             )
 
     async def get_peer_by_id(self, peer_id: int):
+        if not isinstance(peer_id, int):
+            raise KeyError(f"ID not int: {peer_id}")
+
         async with self.pool.acquire() as con:
             r = await con.fetchrow(
                 f"""SELECT id, access_hash, type
