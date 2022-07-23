@@ -120,7 +120,8 @@ class PostgreSQLStorage(Storage):
         await self.date(int(time.time()))
 
     async def close(self):
-        await self.pool.close()
+        pass
+        #await self.pool.close()
 
     async def delete(self):
         async with self.pool.acquire() as con:
