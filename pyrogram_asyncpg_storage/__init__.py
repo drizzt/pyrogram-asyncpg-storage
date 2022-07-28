@@ -20,6 +20,7 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with Pyrogram.  If not, see <http://www.gnu.org/licenses/>.
 
+import asyncio
 import inspect
 import time
 from typing import List, Tuple, Any
@@ -76,9 +77,10 @@ class PostgreSQLStorage(Storage):
         self.pool = pool
         self.schema = self._schema.replace('"', '""')
         self.namespace = self._namespace.replace('"', '""')
+        self.lock = asyncio.Lock()
 
     async def create(self):
-        async with self.pool.acquire() as con:
+        async with self.lock, self.pool.acquire() as con:
             await con.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
             await con.execute(
                 SCHEMA.format(schema=self.schema, namespace=self.namespace)
@@ -130,7 +132,7 @@ class PostgreSQLStorage(Storage):
             await con.execute(f'DROP TABLE "{self.schema}"."{self.namespace}:version"')
 
     async def update_peers(self, peers: List[Tuple[int, int, str, str, str]]):
-        async with self.pool.acquire() as con:
+        async with self.lock, self.pool.acquire() as con:
             await con.executemany(
                 f"""INSERT INTO "{self.schema}"."{self.namespace}:peers"
                     (id, access_hash, type, username, phone_number)
@@ -201,7 +203,7 @@ class PostgreSQLStorage(Storage):
     async def _set(self, value: Any):
         attr = inspect.stack()[2].function
 
-        async with self.pool.acquire() as con:
+        async with self.lock, self.pool.acquire() as con:
             await con.execute(
                 f'UPDATE "{self.schema}"."{self.namespace}:sessions" SET {attr} = $1',
                 value,
@@ -238,7 +240,7 @@ class PostgreSQLStorage(Storage):
                     f'SELECT number FROM "{self.schema}"."{self.namespace}:version"'
                 )
         else:
-            async with self.pool.acquire() as con:
+            async with self.lock, self.pool.acquire() as con:
                 await con.execute(
                     f"""UPDATE "{self.schema}"."{self.namespace}:version"
                         SET number = $1""",
