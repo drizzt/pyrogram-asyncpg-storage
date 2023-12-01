@@ -32,6 +32,17 @@ from pyrogram.storage.sqlite_storage import get_input_peer
 
 __version__ = "0.1"
 
+UPDATE_STATE_SCHEMA = """
+CREATE TABLE "{schema}"."{namespace}:update_state"
+(
+    id   BIGINT PRIMARY KEY,
+    pts  INTEGER,
+    qts  INTEGER,
+    date INTEGER,
+    seq  INTEGER
+);
+"""
+
 SCHEMA = """
 CREATE TABLE "{schema}"."{namespace}:sessions"
 (
@@ -49,9 +60,15 @@ CREATE TABLE "{schema}"."{namespace}:peers"
     id             BIGINT PRIMARY KEY,
     access_hash    BIGINT,
     type           TEXT NOT NULL,
-    username       TEXT,
     phone_number   TEXT,
     last_update_on BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())
+);
+
+CREATE TABLE "{schema}"."{namespace}:usernames"
+(
+    id       BIGINT PRIMARY KEY,
+    username TEXT,
+    FOREIGN KEY (id) REFERENCES "{schema}"."{namespace}:peers"(id)
 );
 
 CREATE TABLE "{schema}"."{namespace}:version"
@@ -60,13 +77,13 @@ CREATE TABLE "{schema}"."{namespace}:version"
 );
 
 CREATE INDEX "idx_{namespace}:peers_id" ON "{schema}"."{namespace}:peers"(id);
-CREATE INDEX "idx_{namespace}:peers_username" ON "{schema}"."{namespace}:peers"(username);
 CREATE INDEX "idx_{namespace}:peers_phone_number" ON "{schema}"."{namespace}:peers"(phone_number);
-"""
+CREATE INDEX "idx_{namespace}:usernames_username" ON "{schema}"."{namespace}:usernames"(username);
+""" + UPDATE_STATE_SCHEMA
 
 
 class PostgreSQLStorage(Storage):
-    VERSION = 1
+    VERSION = 3
     USERNAME_TTL = 8 * 60 * 60
 
     def __init__(self, name: str, pool: Pool, schema: str = "pyrogram"):
@@ -104,7 +121,29 @@ class PostgreSQLStorage(Storage):
             )
 
     async def update(self):
-        pass
+        version = await self.version()
+
+        if version == 1:
+            async with self.lock, self.pool.acquire() as con:
+                await con.execute(
+                    f'ALTER TABLE "{self.schema}"."{self.namespace}:peers" DROP username'
+                )
+                await con.execute(f"""CREATE TABLE "{self.schema}"."{self.namespace}:usernames"
+                                      (
+                                          id       BIGINT PRIMARY KEY,
+                                          username TEXT,
+                                          FOREIGN KEY (id) REFERENCES
+                                          "{self.schema}"."{self.namespace}:peers"(id)
+                                      )""")
+            version += 1
+        elif version == 2:
+            async with self.lock, self.pool.acquire() as con:
+                await con.execute(
+                    UPDATE_STATE_SCHEMA.format(schema=self.schema, namespace=self.namespace)
+            )
+            version += 1
+
+        await self.version(version)
 
     async def open(self):
         async with self.pool.acquire() as con:
@@ -123,26 +162,80 @@ class PostgreSQLStorage(Storage):
 
     async def close(self):
         pass
-        #await self.pool.close()
+        # await self.pool.close()
 
     async def delete(self):
         async with self.pool.acquire() as con:
             await con.execute(f'DROP TABLE "{self.schema}"."{self.namespace}:sessions"')
             await con.execute(f'DROP TABLE "{self.schema}"."{self.namespace}:peers"')
+            await con.execute(
+                f'DROP TABLE "{self.schema}"."{self.namespace}:usernames"'
+            )
             await con.execute(f'DROP TABLE "{self.schema}"."{self.namespace}:version"')
 
-    async def update_peers(self, peers: List[Tuple[int, int, str, str, str]]):
+    async def update_peers(self, peers: List[Tuple[int, int, str, List[str], str]]):
         async with self.lock, self.pool.acquire() as con:
-            await con.executemany(
-                f"""INSERT INTO "{self.schema}"."{self.namespace}:peers"
-                    (id, access_hash, type, username, phone_number)
-                    VALUES ($1, $2, $3, $4, $5) ON CONFLICT(id) DO UPDATE SET
-                    id = EXCLUDED.id, access_hash = EXCLUDED.access_hash,
-                    type = EXCLUDED.type, username = EXCLUDED.username,
-                    phone_number = EXCLUDED.phone_number,
-                    last_update_on = EXTRACT(EPOCH FROM NOW())""",
-                peers,
-            )
+            for peer_data in peers:
+                id, access_hash, type, usernames, phone_number = peer_data
+                await con.execute(
+                    f"""INSERT INTO "{self.schema}"."{self.namespace}:peers"
+                        (id, access_hash, type, phone_number)
+                        VALUES ($1, $2, $3, $4) ON CONFLICT(id) DO UPDATE SET
+                        id = EXCLUDED.id, access_hash = EXCLUDED.access_hash,
+                        type = EXCLUDED.type,
+                        phone_number = EXCLUDED.phone_number,
+                        last_update_on = EXTRACT(EPOCH FROM NOW())""",
+                    id,
+                    access_hash,
+                    type,
+                    phone_number,
+                )
+
+                await con.execute(
+                    f"""DELETE FROM "{self.schema}"."{self.namespace}:usernames"
+                        WHERE id = $1""",
+                    id,
+                )
+
+                await con.executemany(
+                    f"""INSERT INTO "{self.schema}"."{self.namespace}:usernames"
+                        (id, username)
+                        VALUES ($1, $2) ON CONFLICT(id) DO UPDATE SET
+                        id = EXCLUDED.id, username = EXCLUDED.username""",
+                    (
+                        [(id, username) for username in usernames]
+                        if usernames
+                        else [(id, None)]
+                    ),
+                )
+
+    async def update_state(self, value: Tuple[int, int, int, int, int] = object):
+        async with self.lock, self.pool.acquire() as con:
+            if value == object:
+                return await con.fetch(
+                    f"""SELECT id, pts, qts, date, seq
+                        FROM "{self.schema}"."{self.namespace}:update_state"
+                        ORDER BY date ASC"""
+                )
+            else:
+                if isinstance(value, int):
+                    await con.execute(
+                        f"""DELETE
+                            FROM "{self.schema}"."{self.namespace}:update_state"
+                            WHERE id = $1""",
+                        value,
+                    )
+                else:
+                    await con.execute(
+                        f"""INSERT INTO "{self.schema}"."{self.namespace}:update_state"
+                            (id, pts, qts, date, seq)
+                            VALUES ($1, $2, $3, $4, $5)
+                            ON CONFLICT(id) DO UPDATE SET
+                            id = EXCLUDED.id, pts = EXCLUDED.pts,
+                            qts = EXCLUDED.qts, date = EXCLUDED.date,
+                            seq = EXCLUDED.seq""",
+                        *value,
+                    )
 
     async def get_peer_by_id(self, peer_id: int):
         if not isinstance(peer_id, int):
@@ -164,9 +257,12 @@ class PostgreSQLStorage(Storage):
     async def get_peer_by_username(self, username: str):
         async with self.pool.acquire() as con:
             r = await con.fetchrow(
-                f"""SELECT id, access_hash, type, last_update_on
-                    FROM "{self.schema}"."{self.namespace}:peers"
-                    WHERE username = $1""",
+                f"""SELECT p.id, p.access_hash, p.type, p.last_update_on
+                    FROM "{self.schema}"."{self.namespace}:peers" p
+                    JOIN "{self.schema}"."{self.namespace}:usernames" u USING(id)
+                    WHERE u.username = $1
+                    ORDER BY p.last_update_on DESC
+                    LIMIT 1""",
                 username,
             )
 
