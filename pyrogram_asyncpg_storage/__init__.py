@@ -175,9 +175,7 @@ class PostgreSQLStorage(Storage):
 
     async def update_peers(self, peers: List[Tuple[int, int, str, List[str], str]]):
         async with self.lock, self.pool.acquire() as con:
-            for peer_data in peers:
-                id, access_hash, type, usernames, phone_number = peer_data
-                await con.execute(
+                await con.executemany(
                     f"""INSERT INTO "{self.schema}"."{self.namespace}:peers"
                         (id, access_hash, type, phone_number)
                         VALUES ($1, $2, $3, $4) ON CONFLICT(id) DO UPDATE SET
@@ -185,29 +183,28 @@ class PostgreSQLStorage(Storage):
                         type = EXCLUDED.type,
                         phone_number = EXCLUDED.phone_number,
                         last_update_on = EXTRACT(EPOCH FROM NOW())""",
-                    id,
-                    access_hash,
-                    type,
-                    phone_number,
+                    peers
                 )
 
-                await con.execute(
-                    f"""DELETE FROM "{self.schema}"."{self.namespace}:usernames"
-                        WHERE id = $1""",
-                    id,
-                )
+    async def update_usernames(self, usernames: List[Tuple[int, List[str]]]):
+        async with self.lock, self.pool.acquire() as con:
+            await con.executemany(
+                f"""DELETE FROM "{self.schema}"."{self.namespace}:usernames"
+                    WHERE id = $1""",
+                [(id,) for id, _ in usernames],
+            )
 
-                await con.executemany(
-                    f"""INSERT INTO "{self.schema}"."{self.namespace}:usernames"
-                        (id, username)
-                        VALUES ($1, $2) ON CONFLICT(id) DO UPDATE SET
-                        id = EXCLUDED.id, username = EXCLUDED.username""",
-                    (
-                        [(id, username) for username in usernames]
-                        if usernames
-                        else [(id, None)]
-                    ),
-                )
+            await con.executemany(
+                f"""INSERT INTO "{self.schema}"."{self.namespace}:usernames"
+                    (id, username)
+                    VALUES ($1, $2) ON CONFLICT(id) DO UPDATE SET
+                    id = EXCLUDED.id, username = EXCLUDED.username""",
+                (
+                    (id, username) for id, usernames in usernames for username in usernames
+                ),
+            )
+
+
 
     async def update_state(self, value: Tuple[int, int, int, int, int] = object):
         async with self.lock, self.pool.acquire() as con:
