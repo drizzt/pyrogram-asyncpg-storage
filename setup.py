@@ -40,7 +40,7 @@ setup(
     ],
     install_requires=[
         "asyncpg",
-        "pyrogram",
+        "kurigram",
     ],
     python_requires=">=3.6.0",
 )
